@@ -52,6 +52,9 @@ function ShareDbMongo(mongo, options) {
   // For more details on this, see the README.
   this.getOpsWithoutStrictLinking = options.getOpsWithoutStrictLinking || false;
 
+  // Settings this flag to true will run aggregations on secondary members
+  this.aggregationsSecondaryPreferred = options.aggregationsSecondaryPreferred || false;
+
   // Track whether the close method has been called
   this.closed = false;
 
@@ -827,15 +830,7 @@ ShareDbMongo.prototype._query = function(collection, inputQuery, projection, cal
   // collection. Only one operation is run. The result goes in the
   // "extra" argument in the callback.
   if (parsed.collectionOperationKey) {
-    collectionOperationsMap[parsed.collectionOperationKey](
-      collection,
-      parsed.query,
-      parsed.collectionOperationValue,
-      function(err, extra) {
-        if (err) return callback(err);
-        callback(null, [], extra);
-      }
-    );
+    this._runCollectionOperation(collection, parsed, callback);
     return;
   }
 
@@ -1471,24 +1466,44 @@ function getProjection(fields, options) {
   return projection;
 }
 
+ShareDbMongo.prototype._runCollectionOperation = function(collection, parsed, callback) {
+  var collectionOperationKey = parsed.collectionOperationKey;
+  var options;
+
+  if (collectionOperationKey === '$aggregate' && this.aggregationsSecondaryPreferred) {
+    options = { readPreference = 'secondaryPreferred' };
+  }
+
+  collectionOperationsMap[collectionOperationKey](
+    collection,
+    parsed.query,
+    options,
+    parsed.collectionOperationValue,
+    function(err, extra) {
+      if (err) return callback(err);
+      callback(null, [], extra);
+    }
+  );
+}
+
 var collectionOperationsMap = {
-  $distinct: function(collection, query, value, cb) {
-    collection.distinct(value.field, query, cb);
+  $distinct: function(collection, query, options, value, cb) {
+    collection.distinct(value.field, query, options, cb);
   },
-  $aggregate: function(collection, query, value, cb) {
-    var cursor = collection.aggregate(value);
+  $aggregate: function(collection, query, options, value, cb) {
+    var cursor = collection.aggregate(value, options);
     cursor.toArray(cb);
   },
-  $mapReduce: function(collection, query, value, cb) {
+  $mapReduce: function(collection, query, options, value, cb) {
     if (typeof value !== 'object') {
       var err = ShareDbMongo.malformedQueryOperatorError('$mapReduce');
       return cb(err);
     }
-    var mapReduceOptions = {
+    var mapReduceOptions = Object.assign({
       query: query,
       out: {inline: 1},
-      scope: value.scope || {}
-    };
+      scope: value.scope || {},
+    }, options)
     collection.mapReduce(
       value.map, value.reduce, mapReduceOptions, cb);
   }
